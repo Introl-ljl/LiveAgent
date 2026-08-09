@@ -5,8 +5,8 @@ import {
   type PendingUploadedFile,
 } from "@liveagent/ui/lib/chat/uploadedFiles";
 import { invalidateUploadedImagePreviewCache } from "@liveagent/ui/lib/chat/uploadedImagePreview";
-import { invoke } from "@tauri-apps/api/core";
 import { type MutableRefObject, useCallback, useEffect, useRef, useState } from "react";
+import { invoke } from "../../../lib/tauriBridge";
 
 type SystemPickReadableFilesResponse = {
   files: PendingUploadedFile[];
