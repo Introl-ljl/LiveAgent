@@ -1284,7 +1284,7 @@
   "params": [
    {
     "name": "input",
-    "type": "ChatHistorySegmentMutationInput"
+    "type": "ChatHistoryAppendSegmentInput"
    },
    {
     "name": "gateway_controller",
