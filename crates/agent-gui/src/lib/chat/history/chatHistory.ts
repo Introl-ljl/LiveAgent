@@ -1,6 +1,6 @@
 import type { Message } from "@earendil-works/pi-ai";
-import { parseTaskListState } from "../../tools/taskState";
 import { invoke } from "../../tauriBridge";
+import { parseTaskListState } from "../../tools/taskState";
 import { normalizeConversationSystemPrompt } from "../context/systemPrompt";
 import {
   type ConversationViewState,
