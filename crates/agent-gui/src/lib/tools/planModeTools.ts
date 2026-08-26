@@ -258,7 +258,22 @@ export function isPlanModeAllowedTool(
  *  plan mode 规则的唯一权威表述——toolsSuffix 与工具 description 只作指引,
  *  不再复述,避免三处漂移与 token 浪费。措辞刻意不用"MUST before this turn
  *  ends"式高压:那会抬高提交门槛、诱导模型为求"完整"而无限调研。 */
-export function buildPlanModeSystemPromptSection(): string {
+export function buildPlanModeSystemPromptSection(options?: { minimal?: boolean }): string {
+  if (options?.minimal) {
+    return [
+      "<plan-mode>",
+      "Plan mode is ACTIVE. This is a read-only planning phase.",
+      "- Research with the available read-only tools. Stop once you can produce the deliverable; do not re-read files you have already read.",
+      "- Mutation is impossible this turn: write-capable tools are not in your tool list.",
+      `- Submit every complete answer through ${EXIT_PLAN_MODE_TOOL_NAME} instead of plain assistant text.`,
+      "- Submitting ends this turn immediately; the user replies with approval or feedback. On feedback, revise the plan and submit again.",
+      "- If the user asks to save the plan to a file, make that write the first step of the plan itself.",
+      "- On approval, execution starts automatically in the next turn with the same minimal toolset.",
+      "- Keep implementation plans concrete: files to touch, ordered steps, risks, and how to verify.",
+      "</plan-mode>",
+    ].join("\n");
+  }
+
   return [
     "<plan-mode>",
     "Plan mode is ACTIVE. This is a read-only planning phase:",
@@ -286,6 +301,15 @@ Rules:
 - Implementation work: goals, files to change, ordered steps, risks, verification. Analysis/Q&A: the full findings, plus whether any follow-up code changes are needed.
 - If the user asked to save the plan to a file, include that write as the first step of the plan.`;
 
+const EXIT_PLAN_MODE_TOOL_DESCRIPTION_MINIMAL = `Present the complete user-facing deliverable for this turn (every finished answer, not only implementation plans). Only available in plan mode; call it once your research is complete.
+
+Submitting ends this turn immediately. The user replies as a normal message: approval starts execution automatically in the next turn with the same minimal toolset; anything else is feedback — revise the plan and submit again.
+
+Rules:
+- \`plan\` must be the complete, self-contained markdown deliverable. Do not reference earlier messages ("as discussed above").
+- Implementation work: goals, files to change, ordered steps, risks, verification. Analysis/Q&A: the full findings, plus whether any follow-up code changes are needed.
+- If the user asked to save the plan to a file, include that write as the first step of the plan.`;
+
 const exitPlanModeParameters = Type.Object({
   plan: Type.String({
     description:
@@ -305,10 +329,15 @@ function buildErrorResult(toolCall: ToolCall, text: string): ToolResultMessage {
   };
 }
 
-export function createExitPlanModeTools(params: { conversationId: string }): BuiltinToolBundle {
+export function createExitPlanModeTools(params: {
+  conversationId: string;
+  minimal?: boolean;
+}): BuiltinToolBundle {
   const toolExitPlanMode: Tool = {
     name: EXIT_PLAN_MODE_TOOL_NAME,
-    description: EXIT_PLAN_MODE_TOOL_DESCRIPTION,
+    description: params.minimal
+      ? EXIT_PLAN_MODE_TOOL_DESCRIPTION_MINIMAL
+      : EXIT_PLAN_MODE_TOOL_DESCRIPTION,
     parameters: exitPlanModeParameters,
   };
 

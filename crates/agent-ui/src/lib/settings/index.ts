@@ -1344,6 +1344,7 @@ export function normalizeSystemSettings(input: unknown): SystemSettings {
   const obj = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
   return {
     executionMode: normalizeExecutionMode(obj.executionMode),
+    minimalMode: obj.minimalMode === true,
     workdir: normalizeWorkdir(obj.workdir),
     toolPolicies: normalizeToolPolicies(obj.toolPolicies),
     commandSafetyMode: normalizeCommandSafetyMode(obj.commandSafetyMode),
@@ -1563,6 +1564,7 @@ export function getDefaultSettings(): AppSettings {
   return {
     system: {
       executionMode: "tools",
+      minimalMode: false,
       workdir: "",
       commandSafetyMode: "auto",
       workspaceProjects: [],

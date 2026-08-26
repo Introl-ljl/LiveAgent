@@ -500,6 +500,8 @@ export async function runAssistantWithTools(params: {
    * 结果保留在历史),由编排层决定后续(如 plan mode 的补提交/兜底)。缺省无上限。
    */
   maxRounds?: number;
+  /** 极简模式：使用紧凑版工具执行规则，大幅降低 system prompt 体积。 */
+  compactToolsSuffix?: boolean;
 }) {
   const modelId = params.model.trim();
   if (!modelId) throw new Error("No model selected");
@@ -862,11 +864,13 @@ export async function runAssistantWithTools(params: {
       // delivered its answer there is nothing for a follow-up turn to do.
       return true;
     };
+    const suffixTools = filterRequestTools(llmTools) ?? [];
     const toolsSuffix = buildToolsSuffix(
       params.workdir,
-      llmTools.map((tool) => tool.name),
+      suffixTools.map((tool) => tool.name),
       params.runtimePlatform,
       params.additionalRoots,
+      params.compactToolsSuffix ? { compact: true } : undefined,
     );
     let currentSystemPrompt = params.context.systemPrompt;
     let emittedBaselineIndex = params.context.messages.length;

@@ -357,6 +357,15 @@ fn system_value_with_defaults(raw: Option<Value>, default_workdir: &str) -> Valu
         );
     }
 
+    let minimal_mode = system
+        .get(SYSTEM_MINIMAL_MODE_KEY)
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    system.insert(
+        SYSTEM_MINIMAL_MODE_KEY.to_string(),
+        Value::Bool(minimal_mode),
+    );
+
     let workdir = system
         .get(SYSTEM_WORKDIR_KEY)
         .and_then(Value::as_str)
@@ -561,6 +570,7 @@ fn save_system_with_default_workdir(
 
     for key in [
         SYSTEM_EXECUTION_MODE_KEY,
+        SYSTEM_MINIMAL_MODE_KEY,
         SYSTEM_WORKDIR_KEY,
         SYSTEM_TOOL_POLICIES_KEY,
         SYSTEM_COMMAND_SAFETY_MODE_KEY,

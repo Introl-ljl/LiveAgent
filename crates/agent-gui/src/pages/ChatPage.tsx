@@ -1508,6 +1508,9 @@ export function ChatPage(props: ChatPageProps) {
       if (!input.isCurrentConversation) {
         return { activeAgentPrompt, skillsPrompt: "", memoryPrompt: "" };
       }
+      if (isAgentMode && settings.system.minimalMode) {
+        return { activeAgentPrompt, skillsPrompt: "", memoryPrompt: "" };
+      }
       const promptWorkdir = input.workdir?.trim() ?? "";
       const effectivePrompt = resolveEffectivePromptSettings(settings, promptWorkdir).prompt;
       const resources = resolveWorkspaceResources(settings, promptWorkdir);

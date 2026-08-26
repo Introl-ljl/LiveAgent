@@ -8,11 +8,13 @@
 
 import { type ToolPolicy, updateSystem } from "@liveagent/app/lib/settings";
 import type { SettingsSectionProps } from "@liveagent/app/pages/settings/types";
+import { Switch } from "@liveagent/ui/components/ui/switch";
 import { Wrench } from "@liveagent/ui/components/IconSet";
 import { useLocale } from "@liveagent/ui/i18n/index";
 import { useMemo } from "react";
 import { ToolPolicyToggle } from "../../components/hub/ToolPolicyToggle";
 import { BUILTIN_TOOL_CATALOG, BUILTIN_TOOL_CATEGORIES } from "../../lib/tools/builtinToolCatalog";
+import { isMinimalModeToolName } from "../../lib/tools/systemToolOptions";
 
 export function SystemToolsSection(props: SettingsSectionProps) {
   const { settings, setSettings } = props;
@@ -71,6 +73,22 @@ export function SystemToolsSection(props: SettingsSectionProps) {
         ) : null}
       </div>
 
+      <div className="flex items-center justify-between gap-3 rounded-xl border border-border/50 bg-background/60 p-3">
+        <div className="min-w-0">
+          <div className="text-sm font-medium">{t("settings.systemToolsMinimalMode")}</div>
+          <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+            {t("settings.systemToolsMinimalModeDesc")}
+          </p>
+        </div>
+        <Switch
+          checked={settings.system.minimalMode}
+          onCheckedChange={(checked) =>
+            setSettings((prev) => updateSystem(prev, { minimalMode: checked }))
+          }
+          aria-label={t("settings.systemToolsMinimalMode")}
+        />
+      </div>
+
       <div className="space-y-4">
         {groups.map(({ category, entries }) => (
           <div key={category.id} className="space-y-1.5">
@@ -93,6 +111,11 @@ export function SystemToolsSection(props: SettingsSectionProps) {
                         {entry.isReadOnly ? (
                           <span className="rounded-full bg-emerald-500/10 px-1.5 py-0.5 text-[10px] leading-none text-emerald-500">
                             {t("settings.toolDetailReadOnly")}
+                          </span>
+                        ) : null}
+                        {settings.system.minimalMode && isMinimalModeToolName(entry.toolName) ? (
+                          <span className="rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] leading-none text-primary">
+                            {t("settings.systemToolsMinimalModeKept")}
                           </span>
                         ) : null}
                       </div>

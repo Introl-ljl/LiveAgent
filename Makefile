@@ -32,6 +32,7 @@ GATEWAY_DOCKER_IMAGE ?= liveagent-gateway:local
 RELEASE_TAG ?=
 
 .PHONY: all dev build desktop-build-macos desktop-build-macos-release desktop-build-macos-intel desktop-build-macos-m desktop-build-windows desktop-build-linux github-release-main check-github-release-tag help
+.PHONY: local-release local-serve
 .PHONY: dev-gateway dev-webui ensure-webui-embed-stub dev-stack dev-stack-stop dev-stack-restart dev-stack-status dev-stack-logs
 .PHONY: proto proto-check webui gateway-build gateway-docker-build gateway-docker-run gateway-docker-smoke build-linux build-linux-amd build-linux-arm
 .PHONY: clean check-rust-target-% check-macos-signing-identity check-macos-notary-profile desktop-store-macos-notary-profile desktop-wait-macos-notary desktop-staple-macos desktop-verify-macos
@@ -253,6 +254,13 @@ desktop-verify-macos:
 	spctl --assess --type execute --verbose=4 "$$app_path"; \
 	spctl --assess --type open --context context:primary-signature --verbose=4 "$$dmg_path"
 
+## Local release (fork development)
+local-release:
+	node scripts/local-release/prepare-local-release.mjs
+
+local-serve:
+	node scripts/local-release/serve.mjs
+
 help:
 	@printf "\n%s\n" "Desktop"
 	@printf "  %-34s %s\n" "make / make dev" "启动 Tauri 开发环境（Session Workbench 已默认启用）"
@@ -289,6 +297,9 @@ help:
 	@printf "  %-34s %s\n" "make build-linux" "构建 agent-gateway Linux amd64 二进制"
 	@printf "  %-34s %s\n" "make build-linux-arm" "构建 agent-gateway Linux arm64 二进制"
 	@printf "  %-34s %s\n" "make build-windows" "构建 agent-gateway Windows amd64 二进制"
+	@printf "\n%s\n" "Local release (fork)"
+	@printf "  %-34s %s\n" "make local-release" "构建本地发布版本并生成 manifest"
+	@printf "  %-34s %s\n" "make local-serve" "启动本地更新静态服务 (127.0.0.1:7878)"
 	@printf "\n%s\n" "Maintenance"
 	@printf "  %-34s %s\n" "make all" "同时构建 GUI 和 agent-gateway"
 	@printf "  %-34s %s\n" "make clean" "清理 agent-gateway 构建产物"

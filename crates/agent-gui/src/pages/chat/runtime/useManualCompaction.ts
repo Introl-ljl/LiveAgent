@@ -305,12 +305,19 @@ export function useManualCompaction(params: {
         // memory 段已在首轮冻结进 system prompt，这里必须沿用同一份快照与同一批
         // 增量块：否则压缩轮用新读的快照、下一轮发送又翻回冻结的那份，system 段
         // 白翻两次，保留下来的 user 消息字节也对不上。还没有基线时（例如后台会话）
-        // 退回原来现读的结果。
-        const memoryPrompt = memoryTurnInjection.getSystemText(conversationId) ?? freshMemoryPrompt;
-        const memoryTurnUpdates = memoryTurnInjection.getMessageUpdates(conversationId);
+        // 退回原来现读的结果。极简模式与发送链路一致：不注入 memory/skill 段。
+        const minimalModeActive = settings.system.minimalMode === true;
+        const memoryPrompt = minimalModeActive
+          ? ""
+          : memoryTurnInjection.getSystemText(conversationId) ?? freshMemoryPrompt;
+        const memoryTurnUpdates = minimalModeActive
+          ? null
+          : memoryTurnInjection.getMessageUpdates(conversationId);
         // 压缩后保留下来的 user 消息必须连同已挂上的显式提及块一起重放,否则那几条
         // 消息的字节与发出去时对不上,压缩省下的前缀又被自己废掉。
-        const skillMentionUpdates = skillMentionInjection.getMessageUpdates(conversationId);
+        const skillMentionUpdates = minimalModeActive
+          ? null
+          : skillMentionInjection.getMessageUpdates(conversationId);
 
         let compactionFailureMessage = "";
         const sinks: CompactionSinks = {
@@ -366,6 +373,9 @@ export function useManualCompaction(params: {
                   persistedTools
                     .map((tool) => (typeof tool?.name === "string" ? tool.name : ""))
                     .filter(Boolean),
+                  undefined,
+                  undefined,
+                  settings.system.minimalMode ? { compact: true } : undefined,
                 ),
               ),
             );

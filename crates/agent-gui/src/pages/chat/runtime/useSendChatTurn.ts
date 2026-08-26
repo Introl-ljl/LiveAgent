@@ -354,6 +354,7 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
       ? strictestCommandSafetyMode(requestedCommandSafetyMode, settings.system.commandSafetyMode)
       : settings.system.commandSafetyMode;
     const effectiveIsAgentMode = isAgentExecutionMode(effectiveExecutionMode);
+    const minimalMode = effectiveIsAgentMode && settings.system.minimalMode === true;
     // Plan mode:限制性开关,合并方向同 commandSafetyMode 的"只能收紧"——任一
     // 来源(本地 settings / 队列快照 / 网关覆盖)要求 plan mode 即生效,远端
     // 陈旧快照的 false 不得关闭本地已开启的 plan mode。仅 agent 模式有意义。
@@ -400,8 +401,10 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
     );
     const effectiveIsAgentDevExecutionMode = isAgentDevMode(effectiveExecutionMode);
     const workspaceResources = resolveWorkspaceResources(settings, effectiveWorkdir);
+    // 极简模式下 SkillsManager 仍作为延迟工具存在于执行层，但不注入 skills 提示词。
     const effectiveSkillsEnabled = workspaceResources.skillsEnabled && effectiveIsAgentMode;
-    const selectedSkillNames = effectiveSkillsEnabled ? workspaceResources.skillNames : [];
+    const selectedSkillNames =
+      !minimalMode && effectiveSkillsEnabled ? workspaceResources.skillNames : [];
     const getEffectiveMcpSettings = () =>
       filterMcpSettingsForWorkspace(getMcpSettings(), workspaceResources);
     const hasRemoteGatewayTarget =
@@ -1242,15 +1245,16 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
     /** 本轮 `/skill-name` 显式提及块;没有提及时恒为空串,不会挂出任何内容。 */
     let explicitSkillMentionBlock = "";
     let skillsRootDirForTools = skillsRootDir;
-    let skillAccessPolicyForTools: SkillAccessPolicy | undefined = effectiveSkillsEnabled
-      ? {
-          allowedSkillNames: [],
-          allowedSkillBaseDirs: [],
-          allowSkillInventory: false,
-          allowSkillManagement: false,
-          allowSkillMutation: true,
-        }
-      : undefined;
+    let skillAccessPolicyForTools: SkillAccessPolicy | undefined =
+      !minimalMode && effectiveSkillsEnabled
+        ? {
+            allowedSkillNames: [],
+            allowedSkillBaseDirs: [],
+            allowSkillInventory: false,
+            allowSkillManagement: false,
+            allowSkillMutation: true,
+          }
+        : undefined;
 
     // recorder 跨轮存活：header 分段去重靠的就是「上一份 refs」，每轮新建会让
     // 去重立刻失效。这里只更新本轮的活动 segment。
@@ -1309,13 +1313,13 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
         // 只有发给主模型的上下文才需要增量块;记忆抽取这类复用同一份消息的旁路
         // 必须显式关掉,否则块里的索引行会被当成用户说的话再抽一遍。
         memoryTurnUpdates:
-          options?.includeMemoryTurnUpdates === false
+          minimalMode || options?.includeMemoryTurnUpdates === false
             ? null
             : memoryTurnInjection.getMessageUpdates(conversationId),
         // 显式提及块与 memory 增量同一个口径:同样是合成出来的上下文,不能被
         // 记忆抽取这类旁路当成用户说的话再抽一遍。
         skillMentionUpdates:
-          options?.includeMemoryTurnUpdates === false
+          minimalMode || options?.includeMemoryTurnUpdates === false
             ? null
             : skillMentionInjection.getMessageUpdates(conversationId),
         includeAbortedMessages: options?.includeAbortedMessages,
@@ -1337,8 +1341,10 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
         activeAgentPrompt: effectiveAgentPrompt,
         skillsPrompt,
         memoryPrompt,
-        memoryTurnUpdates: memoryTurnInjection.getMessageUpdates(conversationId),
-        skillMentionUpdates: skillMentionInjection.getMessageUpdates(conversationId),
+        memoryTurnUpdates: minimalMode ? null : memoryTurnInjection.getMessageUpdates(conversationId),
+        skillMentionUpdates: minimalMode
+          ? null
+          : skillMentionInjection.getMessageUpdates(conversationId),
         includeAbortedMessages: options?.includeAbortedMessages,
         includeUploadedFilesMetadata: options?.includeUploadedFilesMetadata,
         captureSlots: trajectorySlotCapture(conversationId),
@@ -1490,34 +1496,39 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
     // 因此只有首轮走 system prompt(那时它本就是稳定前缀的一部分),之后 system
     // 段冻结,变化改挂到当轮 user 消息尾部 —— 复用 pi-ai 已经打在最后一条 user
     // 消息上的那个断点,不额外占用 Anthropic 的 4 个 cache_control 名额。
-    let memoryOverview: string | null = null;
-    try {
-      memoryOverview = await buildMemoryOverviewSection(effectiveWorkdir);
-    } catch (error) {
-      console.warn("Failed to build memory overview prompt", error);
-      // null 表示这轮没读到,基线维持原样;空串是「一条记忆都没有」,属于正常内容。
-      memoryOverview = null;
-    }
-    if (await finishRequestedStopBeforeRuntime()) {
+    // 极简模式不构建 memory/skills 提示词,也不记录显式提及。
+    if (!minimalMode) {
+      let memoryOverview: string | null = null;
+      try {
+        memoryOverview = await buildMemoryOverviewSection(effectiveWorkdir);
+      } catch (error) {
+        console.warn("Failed to build memory overview prompt", error);
+        // null 表示这轮没读到,基线维持原样;空串是「一条记忆都没有」,属于正常内容。
+        memoryOverview = null;
+      }
+      if (await finishRequestedStopBeforeRuntime()) {
+        return true;
+      }
+      // 放在停止检查之后:这一轮被停掉时请求根本没发出去,提前推进基线会让下一轮
+      // 漏报这次变化。
+      memoryPrompt = memoryTurnInjection.planTurn({
+        conversationId,
+        messageId: pendingUserMessage.id,
+        overview: memoryOverview,
+        // project 段随 workdir 换血,增量 diff 无法保真表达;基线记录冻结时的
+        // workdir,切换时由 planTurn 触发重冻结。
+        workdir: effectiveWorkdir,
+      }).systemText;
+      // 同样放在停止检查之后:这一轮被停掉时消息根本没发出去,提前记账只会给一个
+      // 永远对不上的消息 id 留下垃圾块。空块不会创建任何状态。
+      skillMentionInjection.record({
+        conversationId,
+        messageId: pendingUserMessage.id,
+        block: explicitSkillMentionBlock,
+      });
+    } else if (await finishRequestedStopBeforeRuntime()) {
       return true;
     }
-    // 放在停止检查之后:这一轮被停掉时请求根本没发出去,提前推进基线会让下一轮
-    // 漏报这次变化。
-    memoryPrompt = memoryTurnInjection.planTurn({
-      conversationId,
-      messageId: pendingUserMessage.id,
-      overview: memoryOverview,
-      // project 段随 workdir 换血,增量 diff 无法保真表达;基线记录冻结时的
-      // workdir,切换时由 planTurn 触发重冻结。
-      workdir: effectiveWorkdir,
-    }).systemText;
-    // 同样放在停止检查之后:这一轮被停掉时消息根本没发出去,提前记账只会给一个
-    // 永远对不上的消息 id 留下垃圾块。空块不会创建任何状态。
-    skillMentionInjection.record({
-      conversationId,
-      messageId: pendingUserMessage.id,
-      block: explicitSkillMentionBlock,
-    });
 
     const hookScope = createHookRunScope({
       hooks: getAutomationState().hooks.hooks,
@@ -1700,6 +1711,7 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
             getToolPolicies,
             commandSafetyMode: effectiveCommandSafetyMode,
             planModeEnabled: effectivePlanModeEnabled,
+            minimalMode: minimalMode || undefined,
             applyMcpOps: (ops) => {
               const removedIds = ops.filter((op) => op.kind === "remove").map((op) => op.serverId);
               setSettings((prev) =>

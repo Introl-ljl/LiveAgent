@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
-use reqwest::header::{ACCEPT, RANGE, USER_AGENT};
+use reqwest::header::{RANGE, USER_AGENT};
 use reqwest::StatusCode;
 use serde::Serialize;
 use tauri::{AppHandle, Url};
@@ -74,12 +74,12 @@ fn update_repository() -> String {
         .unwrap_or_else(|| DEFAULT_UPDATE_REPOSITORY.to_string())
 }
 
-fn updater_public_key_override() -> Option<String> {
-    std::env::var("LIVEAGENT_UPDATER_PUBLIC_KEY")
+fn local_manifest_url() -> Result<String, String> {
+    Ok(std::env::var("LIVEAGENT_LOCAL_MANIFEST_URL")
         .ok()
-        .or_else(|| option_env!("LIVEAGENT_UPDATER_PUBLIC_KEY").map(str::to_string))
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "http://127.0.0.1:7878/latest.json".to_string()))
 }
 
 fn release_channel(release: &SelectedRelease) -> AppUpdateChannel {
@@ -104,6 +104,7 @@ fn is_newer_version(remote: &str, current: &str) -> bool {
     }
 }
 
+#[allow(dead_code)]
 fn github_url_with_segments<'a>(
     segments: impl IntoIterator<Item = &'a str>,
 ) -> Result<String, String> {
@@ -121,6 +122,7 @@ fn github_url_with_segments<'a>(
     Ok(url.to_string())
 }
 
+#[allow(dead_code)]
 fn repository_segments(repository: &str) -> Vec<&str> {
     repository
         .split('/')
@@ -129,24 +131,28 @@ fn repository_segments(repository: &str) -> Vec<&str> {
         .collect()
 }
 
+#[allow(dead_code)]
 fn release_feed_url(repository: &str) -> Result<String, String> {
     let mut segments = repository_segments(repository);
     segments.push("releases.atom");
     github_url_with_segments(segments)
 }
 
+#[allow(dead_code)]
 fn release_tag_url(repository: &str, tag_name: &str) -> Result<String, String> {
     let mut segments = repository_segments(repository);
     segments.extend(["releases", "tag", tag_name]);
     github_url_with_segments(segments)
 }
 
+#[allow(dead_code)]
 fn release_manifest_url(repository: &str, tag_name: &str) -> Result<String, String> {
     let mut segments = repository_segments(repository);
     segments.extend(["releases", "download", tag_name, UPDATE_MANIFEST_ASSET]);
     github_url_with_segments(segments)
 }
 
+#[allow(dead_code)]
 fn tag_name_from_release_url(value: &str) -> Option<String> {
     let url = Url::parse(value).ok()?;
     let segments = url.path_segments()?.collect::<Vec<_>>();
@@ -158,6 +164,7 @@ fn tag_name_from_release_url(value: &str) -> Option<String> {
         .map(|segment| segment.to_string())
 }
 
+#[allow(dead_code)]
 fn is_semver_prerelease_tag(tag_name: &str) -> bool {
     let version = tag_name
         .trim()
@@ -166,6 +173,7 @@ fn is_semver_prerelease_tag(tag_name: &str) -> bool {
     version.contains('-')
 }
 
+#[allow(dead_code)]
 fn release_link_from_attributes(element: &BytesStart<'_>) -> Result<Option<String>, String> {
     let mut href: Option<String> = None;
     let mut rel: Option<String> = None;
@@ -191,6 +199,7 @@ fn release_link_from_attributes(element: &BytesStart<'_>) -> Result<Option<Strin
     }
 }
 
+#[allow(dead_code)]
 fn parse_release_feed(feed: &str) -> Result<Vec<ReleaseFeedEntry>, String> {
     let mut reader = Reader::from_str(feed);
     reader.config_mut().trim_text(true);
@@ -266,6 +275,7 @@ fn parse_release_feed(feed: &str) -> Result<Vec<ReleaseFeedEntry>, String> {
     Ok(entries)
 }
 
+#[allow(dead_code)]
 fn selected_release_candidates_from_entries(
     repository: &str,
     entries: Vec<ReleaseFeedEntry>,
@@ -291,6 +301,7 @@ fn selected_release_candidates_from_entries(
         .collect()
 }
 
+#[allow(dead_code)]
 fn github_client() -> Result<reqwest::Client, String> {
     // 应用代理启用时更新检查随之走应用代理；未启用时回退 reqwest 默认代理探测
     // （OS 代理环境变量/系统代理设置），无系统代理即直连，尽可能保证 GitHub 可达。
@@ -300,6 +311,7 @@ fn github_client() -> Result<reqwest::Client, String> {
         .map_err(|error| format!("failed to create GitHub client: {error}"))
 }
 
+#[allow(dead_code)]
 async fn manifest_exists(client: &reqwest::Client, manifest_url: &str) -> Result<bool, String> {
     let response = client
         .head(manifest_url)
@@ -368,7 +380,13 @@ fn response_for_release(
         configured: true,
         available,
         current_version: current_version(app),
-        version: update_version.or_else(|| Some(version_from_tag(&release.tag_name))),
+        version: update_version.or_else(|| {
+            if release.tag_name == "local" {
+                None
+            } else {
+                Some(version_from_tag(&release.tag_name))
+            }
+        }),
         date: update_date.or_else(|| release.published_at.clone()),
         body: update_body,
         channel: release_channel(release),
@@ -392,53 +410,28 @@ fn missing_platform_response(
     error: tauri_plugin_updater::Error,
 ) -> AppUpdateCheckResponse {
     let mut response = response_for_release(app, repository, release, false, None, None, None);
-    response.manual_download =
-        is_newer_version(&version_from_tag(&release.tag_name), &current_version(app));
+    response.manual_download = if release.tag_name == "local" {
+        false
+    } else {
+        is_newer_version(&version_from_tag(&release.tag_name), &current_version(app))
+    };
     response.message = Some(error.to_string());
     response
 }
 
 async fn select_release_manifest(
-    repository: &str,
-    include_prerelease: bool,
+    _repository: &str,
+    _include_prerelease: bool,
 ) -> Result<Option<SelectedRelease>, String> {
-    let client = github_client()?;
-    let feed_url = release_feed_url(repository)?;
-    let response = client
-        .get(feed_url)
-        .header(USER_AGENT, "LiveAgent-Updater")
-        .header(
-            ACCEPT,
-            "application/atom+xml, application/xml;q=0.9, */*;q=0.8",
-        )
-        .send()
-        .await
-        .map_err(|error| format!("failed to query GitHub release feed: {error}"))?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        return Err(format!(
-            "GitHub release feed lookup failed with status {status}"
-        ));
-    }
-
-    let feed = response
-        .text()
-        .await
-        .map_err(|error| format!("failed to read GitHub release feed: {error}"))?;
-    let candidates = selected_release_candidates_from_entries(
-        repository,
-        parse_release_feed(&feed)?,
-        include_prerelease,
-    )?;
-
-    for release in candidates {
-        if manifest_exists(&client, &release.manifest_url).await? {
-            return Ok(Some(release));
-        }
-    }
-
-    Ok(None)
+    let manifest_url = local_manifest_url()?;
+    Ok(Some(SelectedRelease {
+        tag_name: "local".to_string(),
+        name: None,
+        prerelease: false,
+        html_url: None,
+        published_at: None,
+        manifest_url,
+    }))
 }
 
 fn build_updater(
@@ -448,10 +441,9 @@ fn build_updater(
     let manifest_url = Url::parse(manifest_url)
         .map_err(|error| format!("invalid updater manifest URL: {error}"))?;
 
+    // The updater public key is embedded by the signed application config.
+    // Do not replace it from a runtime environment variable that may be stale.
     let mut builder = app.updater_builder();
-    if let Some(public_key) = updater_public_key_override() {
-        builder = builder.pubkey(public_key);
-    }
 
     // 更新下载/安装与 github_client() 的探测请求保持同一份代理语义：应用代理
     // 启用时显式走应用代理；未启用时不调 no_proxy()，让插件内部 client 走
@@ -677,6 +669,11 @@ mod tests {
         // Unparseable versions fall back to inequality.
         assert!(is_newer_version("nightly-2", "nightly-1"));
         assert!(!is_newer_version("", "0.1.1"));
+        // Local fork int markers: -int001 < -int002 (3-digit zero-padded).
+        assert!(is_newer_version("1.1.8-int002", "1.1.8-int001"));
+        assert!(!is_newer_version("1.1.8-int001", "1.1.8-int002"));
+        assert!(!is_newer_version("1.1.8-int001", "1.1.8"));
+        assert!(is_newer_version("1.1.8", "1.1.8-int001"));
     }
 
     #[test]

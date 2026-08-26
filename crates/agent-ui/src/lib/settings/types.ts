@@ -302,6 +302,8 @@ export const COMMAND_SAFETY_MODES: readonly CommandSafetyMode[] = [
 
 export type SystemSettings = {
   executionMode: ExecutionMode;
+  /** 极简模式：只注册 8 个核心工具，并使用紧凑工具说明/系统提示词。 */
+  minimalMode: boolean;
   workdir: string;
   /**
    * 按规范工具名(内置名 / `mcp_*`)覆盖审批策略;缺省由

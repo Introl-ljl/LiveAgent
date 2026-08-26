@@ -645,6 +645,48 @@ test("non-plan tool rules still allow answering analysis without tools", () => {
   assert.match(suffix, /resumable command waiting \(ProcessWait \/ ProcessStop\)/);
 });
 
+test("compact tool suffix keeps core rules and drops optional tool sections", () => {
+  const suffix = agentRunnerModule.buildToolsSuffix(
+    "/workspace",
+    ["Read", "Write", "Edit", "Delete", "Bash", "Grep", "Glob", "List"],
+    "linux",
+    undefined,
+    { compact: true },
+  );
+  assert.match(suffix, /# Tool-Execution Mode/);
+  assert.match(suffix, /## Workspace & Paths/);
+  assert.match(suffix, /Workspace root: `\/workspace`/);
+  assert.match(suffix, /## File Operations/);
+  assert.match(suffix, /use Grep \/ Glob \/ List first when the path is unknown/);
+  assert.match(suffix, /use Delete for deletions, not Bash/);
+  assert.match(suffix, /## Bash/);
+  assert.match(suffix, /Current platform: Linux/);
+  assert.match(suffix, /## Available Tools/);
+  assert.match(suffix, /Read \/ Write \/ Edit \/ Delete \/ List \/ Grep \/ Glob · Bash/);
+  assert.doesNotMatch(suffix, /## Showing Images/);
+  assert.doesNotMatch(suffix, /Image tool/);
+  assert.doesNotMatch(suffix, /## Agent Delegation/);
+  assert.doesNotMatch(suffix, /ManagedProcess/);
+  assert.doesNotMatch(suffix, /## Task Planning/);
+  assert.doesNotMatch(suffix, /AskUserQuestion/);
+});
+
+test("compact tool suffix uses short plan-mode language", () => {
+  const suffix = agentRunnerModule.buildToolsSuffix(
+    "/workspace",
+    ["Read", "List", "Grep", "Glob", "ExitPlanMode"],
+    "linux",
+    undefined,
+    { compact: true },
+  );
+  assert.match(suffix, /Plan mode is ACTIVE/);
+  assert.match(suffix, /submit the complete deliverable via ExitPlanMode/);
+  assert.match(suffix, /Do not put the deliverable here; call ExitPlanMode instead/);
+  assert.doesNotMatch(suffix, /AskUserQuestion/);
+  assert.doesNotMatch(suffix, /full tools/);
+  assert.doesNotMatch(suffix, /TaskCreate/);
+});
+
 test("fs tool descriptions keep Image as the only display path for images", () => {
   const sourcePath = fileURLToPath(new URL("../../src/lib/tools/fsTools.ts", import.meta.url));
   const source = fs.readFileSync(sourcePath, "utf8");

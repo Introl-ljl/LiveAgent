@@ -98,6 +98,7 @@ import { formatTaskListRuntimeContext, type TaskStateStore } from "../../../lib/
 import { isSessionApproved, requestToolApproval } from "../../../lib/tools/toolApproval";
 import { resolveToolPolicy } from "../../../lib/tools/toolPolicy";
 import {
+  buildDeferredToolRequestFilter,
   buildMcpRequestToolFilter,
   getMcpToolActivation,
 } from "../../../lib/tools/toolSearchTools";
@@ -306,6 +307,8 @@ export type RunAgentConversationTurnParams = {
   commandSafetyMode?: AppSettings["system"]["commandSafetyMode"];
   /** Plan mode(turn 级快照):真时本轮只注入只读工具 + ExitPlanMode 提交闸门。 */
   planModeEnabled?: boolean;
+  /** 极简模式：只注册核心工具，跳过子代理/任务/技能/记忆上下文，使用紧凑提示词。 */
+  minimalMode?: boolean;
   applyMcpOps?: (ops: McpSettingsOp[]) => void;
   remoteWebTunnelsEnabled?: boolean;
   tunnelPublicBaseUrl?: string;
@@ -395,6 +398,7 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
     getToolPolicies,
     commandSafetyMode,
     planModeEnabled,
+    minimalMode,
     applyMcpOps,
     remoteWebTunnelsEnabled,
     tunnelPublicBaseUrl,
@@ -434,6 +438,7 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
     onMemoryExtractionModelFailure,
     memoryExtractionStatusText,
   } = params;
+  const minimalModeActive = minimalMode === true;
   // 埋点全程可选：未注入 recorder 时所有调用落到无副作用的 NOOP 实现上，
   // 对话路径一行都不变。
   const trajectory = params.trajectory ?? NOOP_TRAJECTORY_RECORDER;
@@ -459,7 +464,7 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
   memoryExtraction.noteTurnBoundary(conversationId);
 
   const loadParentBusMessages = async () => {
-    if (!subagentStore) return null;
+    if (!subagentStore || minimalModeActive) return null;
     try {
       return await subagentStore.listBusMessages(SUBAGENT_PARENT_ID);
     } catch (error) {
@@ -503,7 +508,7 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
     frozenBusSeq = snapshot.renderedSeq;
     renderedBusSeq = frozenBusSeq;
   };
-  if (subagentStore) {
+  if (subagentStore && !minimalModeActive) {
     try {
       await subagentStore.ready();
       rosterIdentitySection = buildRosterIdentitySection({
@@ -520,7 +525,8 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
     subagentStoreReadyStartedAt,
     {
       conversationId,
-      identityCount: subagentStore?.listIdentities().length ?? 0,
+      identityCount:
+        !subagentStore || minimalModeActive ? 0 : subagentStore.listIdentities().length,
     },
   );
   const buildParentMessageBusDelta = async () => {
@@ -541,7 +547,7 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
   // 模型真要委派时看得到。
   let renderedRosterRunStatus = "";
   const buildRosterRunStatusDelta = () => {
-    if (!subagentStore) return "";
+    if (!subagentStore || minimalModeActive) return "";
     let section = "";
     try {
       section = buildRosterRunStatusSection({
@@ -564,6 +570,11 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
   // 免费的。代价是 run 内新建的任务不出现在 system 段，由工具结果覆盖。
   let frozenTaskListContext = "";
   const refreezeTaskListContext = () => {
+    // 极简模式不注入任务列表段：任务工具不在注册表内。
+    if (minimalModeActive) {
+      frozenTaskListContext = "";
+      return "";
+    }
     // 只注入本 Run 的权威任务状态：edit-resend 等路径可能把上一 Run 持久化的
     // taskList 带回 meta，工具层按 runId 视其为不存在，注入必须同口径。
     const taskList = getNextConversationState().meta.taskList;
@@ -576,7 +587,9 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
   refreezeTaskListContext();
   // Plan mode 段:turn 级快照、run 内恒定文本,与 frozenTaskListContext 同列
   // 冻结注入——system 段任何变动都会作废整条前缀缓存,绝不能随状态中途改写。
-  const planModeSection = planModeEnabled ? buildPlanModeSystemPromptSection() : "";
+  const planModeSection = planModeEnabled
+    ? buildPlanModeSystemPromptSection(minimalModeActive ? { minimal: true } : undefined)
+    : "";
   // Plan mode 运行策略(turn 级实例):有界升级状态机——终止谓词、轮数熔断、
   // 重复调用守卫、run 后的补提交/兜底裁决全部收敛于此,runner 保持模式无关。
   const planRunPolicy = planModeEnabled ? createPlanModeRunPolicy({ conversationId }) : null;
@@ -629,6 +642,7 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
       conversationId,
       turnId: checkpointTurnId?.trim() || crypto.randomUUID(),
     },
+    minimalMode: minimalModeActive || undefined,
     skillsEnabled: effectiveSkillsEnabled,
     skillsRootDir,
     skillAccessPolicy,
@@ -678,17 +692,40 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
       ) !== "deny",
   );
 
+  // 工具懒加载:极简模式使用通用 deferredToolNames；非极简 MCP 懒加载仍走
+  // buildMcpRequestToolFilter。执行层保持全量注册，只有发给模型的请求被裁剪。
+  const toolDeferralActive =
+    builtinRegistry.mcpToolDeferralActive === true ||
+    builtinRegistry.toolDeferralActive === true;
+  const requestToolFilter = toolDeferralActive
+    ? builtinRegistry.toolDeferralActive
+      ? buildDeferredToolRequestFilter({
+          conversationId,
+          metadataByName: builtinRegistry.metadataByName,
+          deferredToolNames: builtinRegistry.deferredToolNames ?? [],
+        })
+      : buildMcpRequestToolFilter({
+          conversationId,
+          metadataByName: builtinRegistry.metadataByName,
+        })
+    : undefined;
+  const visibleCombinedTools = requestToolFilter
+    ? combinedTools.filter((tool) => requestToolFilter(tool.name))
+    : combinedTools;
+
   // 工具执行规则段（toolsSuffix）由 runner 在 provider 边界拼进 systemPrompt，
   // 传给账本/检查点估值的上下文都在此之前。不注入这份估算，压缩后的无锚点
   // 窗口（检查点权威值 + 首个真实 usage 到达前）会系统性少算 ~4k，首个 usage
   // 一到环就跳涨。每轮重注：工具集变化随之更新，文本模式会覆盖为小值。
+  // 极简模式下按“实际会发给模型”的可见工具估算，而非全量执行层。
   compaction.noteFixedOverheadTokens(
     estimateTextTokens(
       buildToolsSuffix(
         effectiveWorkdir,
-        combinedTools.map((tool) => tool.name),
+        visibleCombinedTools.map((tool) => tool.name),
         runtimePlatform,
         additionalRoots,
+        minimalModeActive ? { compact: true } : undefined,
       ),
     ),
   );
@@ -696,11 +733,11 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
   const preCompactionStartedAt = perfNowMs();
   await compaction.maybeCompactPreSend({
     budgetContext: withAgentRuntimeContext(
-      buildPreparedContext(getNextConversationState(), combinedTools, {
+      buildPreparedContext(getNextConversationState(), visibleCombinedTools, {
         includeUploadedFilesMetadata: true,
       }),
     ),
-    tools: combinedTools,
+    tools: visibleCombinedTools,
     includeUploadedFilesMetadata: true,
   });
   finishAgentPerfSpan(
@@ -708,7 +745,7 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
     "conversation.pre_compaction",
     preCompactionStartedAt,
     {
-      toolCount: combinedTools.length,
+      toolCount: visibleCombinedTools.length,
     },
   );
   // 压缩边界①：发送前压缩已重建前缀，此处重新冻结不额外损失命中率。
@@ -716,30 +753,27 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
   // systemPrompt，不可能产生新的 bus 消息，重读一次纯属多余的 IPC。
   refreezeTaskListContext();
 
-  // MCP 懒加载:未激活的 MCP 工具不进模型请求(runner 每轮重估此谓词,
-  // ToolSearch 激活后下一轮立即可见);执行层保持全量注册。
-  const requestToolFilter = builtinRegistry.mcpToolDeferralActive
-    ? buildMcpRequestToolFilter({
-        conversationId,
-        metadataByName: builtinRegistry.metadataByName,
-      })
-    : undefined;
-
   const combinedExecutor: (
     toolCall: ToolCall,
     signal?: AbortSignal,
     context?: BuiltinToolExecutionContext,
   ) => Promise<Message> = (tc, signal, context) => {
-    // 直呼未激活 MCP 业务工具(模型凭历史记忆/精确猜名)也放行并顺带激活——
+    // 直呼未激活延迟工具(模型凭历史记忆/精确猜名)也放行并顺带激活——
     // 执行层本就找得到;激活保证后续轮次请求里能看到 schema,避免模型困惑。
-    // 判定同 requestToolFilter:kind === "mcp" 才是延迟对象(McpManager 不是)。
     const tcMetadata = builtinRegistry.metadataByName.get(tc.name);
-    if (
-      builtinRegistry.mcpToolDeferralActive &&
-      tcMetadata?.groupId === "mcp" &&
-      tcMetadata.kind === "mcp"
-    ) {
-      getMcpToolActivation(conversationId).add(tc.name);
+    if (toolDeferralActive) {
+      if (
+        builtinRegistry.toolDeferralActive &&
+        builtinRegistry.deferredToolNames?.includes(tc.name)
+      ) {
+        getMcpToolActivation(conversationId).add(tc.name);
+      } else if (
+        builtinRegistry.mcpToolDeferralActive &&
+        tcMetadata?.groupId === "mcp" &&
+        tcMetadata.kind === "mcp"
+      ) {
+        getMcpToolActivation(conversationId).add(tc.name);
+      }
     }
     return builtinRegistry.executeToolCall(tc, signal, context);
   };
@@ -1070,6 +1104,7 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
         resolveToolTermination: planRunPolicy?.resolveToolTermination,
         resolveToolChoice: planRunPolicy ? () => planRunPolicy.resolveToolChoice() : undefined,
         maxRounds: planRunPolicy?.maxRounds(),
+        compactToolsSuffix: minimalModeActive,
         onRequestStart: ({ round, context, toolsSuffix }) => {
           const activeSources = new Set(
             currentTrajectoryRuntimeContext.entries.map((entry) => entry.source),
@@ -1083,7 +1118,19 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
             lastRecordedRuntimeContextBySource.set(entry.source, entry.text);
           }
 
-          const toolCatalog = serializeToolCatalog(context.tools);
+          const requestTools = context.tools ?? [];
+          const toolCatalog = serializeToolCatalog(requestTools);
+          // 极简模式验收：记录一次实际发给模型的完整 tools JSON 与 token 估算。
+          if (minimalModeActive && round === 1) {
+            const toolsJson = JSON.stringify(toolCatalog);
+            conversationDebugLogger.logResult({
+              type: "minimal_mode_tools_snapshot",
+              round,
+              toolCount: requestTools.length,
+              toolsJson,
+              estimatedTokens: estimateTextTokens(toolsJson),
+            });
+          }
           const segmentedHeader = {
             ...(params.readTrajectorySlots?.() ?? {}),
             ...(currentTrajectoryRuntimeContext.prompt === undefined

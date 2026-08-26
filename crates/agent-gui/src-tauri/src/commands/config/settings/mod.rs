@@ -33,6 +33,9 @@ const STT_SETTINGS_TABLE: &str = "stt_settings";
 const BACKUP_SYNC_SETTINGS_TABLE: &str = "backup_sync_settings";
 
 const SYSTEM_EXECUTION_MODE_KEY: &str = "executionMode";
+// 极简模式开关。必须纳入 system_settings 的保存白名单，否则前端更新后
+// 会在 settings_save_system 的全量重写过程中被静默丢弃。
+const SYSTEM_MINIMAL_MODE_KEY: &str = "minimalMode";
 const SYSTEM_WORKDIR_KEY: &str = "workdir";
 // 工具审批策略(按工具名/`group:`/`server:` 键 → allow/ask/deny)。此前未纳入
 // 保存白名单,导致重启后设置丢失;补入本键持久化。

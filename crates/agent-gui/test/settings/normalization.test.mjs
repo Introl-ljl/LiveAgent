@@ -2574,6 +2574,14 @@ test("close window behavior defaults to minimize and only accepts exit", () => {
   );
 });
 
+test("minimal mode defaults to false, normalizes true, and falls back on old snapshots", () => {
+  assert.equal(settings.getDefaultSettings().system.minimalMode, false);
+  assert.equal(settings.normalizeSystemSettings({}).minimalMode, false);
+  assert.equal(settings.normalizeSystemSettings({ minimalMode: true }).minimalMode, true);
+  assert.equal(settings.normalizeSystemSettings({ minimalMode: "yes" }).minimalMode, false);
+  assert.equal(settings.normalizeSystemSettings({}).minimalMode, false);
+});
+
 test("system proxy config normalizes defaults, ports, and password flags", () => {
   const defaults = settings.getDefaultSettings().system.systemProxy;
   assert.deepEqual(defaults, {

@@ -281,6 +281,10 @@ export const EN_US_SETTINGS_TRANSLATIONS = {
   "settings.systemTools": "System Tools",
   "settings.systemToolsDesc":
     "View the built-in tools that LiveAgent registers automatically in Agent mode, and set an approval policy per tool (allow / ask before running / deny).",
+  "settings.systemToolsMinimalMode": "Minimal Mode",
+  "settings.systemToolsMinimalModeDesc":
+    "Keep seven resident tools — Read / Write / Edit / Glob / Grep / Bash / ToolSearch — and load MemoryManager and other tools on demand via ToolSearch, targeting roughly 4K tokens of default base context.",
+  "settings.systemToolsMinimalModeKept": "Kept in Minimal Mode",
   "settings.builtinToolCategory.fs": "File System",
   "settings.builtinToolCategory.process": "Terminal & Processes",
   "settings.builtinToolCategory.intelligence": "Intelligence & Memory",

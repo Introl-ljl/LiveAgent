@@ -1,5 +1,9 @@
 import type { ToolCall, ToolResultMessage } from "@earendil-works/pi-ai";
-import type { SystemToolRuntimeScope } from "@liveagent/ui/lib/tools/systemToolOptions";
+import { EXIT_PLAN_MODE_TOOL_NAME } from "@liveagent/ui/lib/chat/planMode";
+import {
+  isMinimalModeToolName,
+  type SystemToolRuntimeScope,
+} from "@liveagent/ui/lib/tools/systemToolOptions";
 import { homeDir } from "@tauri-apps/api/path";
 import type { RuntimePlatform } from "../runtimePlatform";
 import {
@@ -35,7 +39,12 @@ import { createSkillTools } from "./skillTools";
 import { createSSHManagerTools, type SshManagerSessionChange } from "./sshManagerTools";
 import { createTaskTools, type TaskStateStore } from "./taskTools";
 import { createTerminalTools } from "./terminalTools";
-import { createToolSearchTools, shouldDeferMcpTools } from "./toolSearchTools";
+import {
+  createToolSearchTools,
+  shouldDeferMcpTools,
+  TOOL_SEARCH_TOOL_NAME,
+  type DeferredToolEntry,
+} from "./toolSearchTools";
 import { createTunnelManagerTools, type TunnelManagerChange } from "./tunnelManagerTools";
 
 export type BuiltinToolRegistry = {
@@ -50,6 +59,10 @@ export type BuiltinToolRegistry = {
   /** MCP 懒加载已启用:调用方应给 runner 挂 requestToolFilter(未激活的 MCP
    * 工具不进模型请求)。工具仍全量在 tools 里——执行层必须找得到它们。 */
   mcpToolDeferralActive?: boolean;
+  /** 极简模式通用懒加载已启用：deferredToolNames 中的工具未激活时不进模型请求。 */
+  toolDeferralActive?: boolean;
+  /** 极简模式下被延迟注入的工具名（常驻工具/ToolSearch/ExitPlanMode 除外）。 */
+  deferredToolNames?: readonly string[];
 };
 
 // 第三方来源(MCP server / 插件)的工具名不受我们控制,可能撞车。撞车时不能像
@@ -164,6 +177,8 @@ type BuildBuiltinBaseToolRegistryParams = {
   fileState: FileToolState;
   /** OS 级沙箱设置;透传给 Bash / ManagedProcess 执行层。 */
   sandbox?: ShellSandboxSettings;
+  /** 极简模式：执行层保留全量工具，请求层只暴露常驻/已激活工具。 */
+  minimalMode?: boolean;
   skillsEnabled: boolean;
   skillsRootDir?: string;
   skillAccessPolicy?: SkillAccessPolicy;
@@ -208,9 +223,36 @@ type BaseBuiltinToolBundles = {
   mcpBusinessBundle: McpBusinessToolBundle | undefined;
 };
 
+function collectDeferredToolEntries(params: {
+  bundles: readonly BuiltinToolBundle[];
+  mcpBusinessBundle: McpBusinessToolBundle | undefined;
+}): DeferredToolEntry[] {
+  const entries: DeferredToolEntry[] = [];
+  const seen = new Set<string>();
+  for (const bundle of params.bundles) {
+    for (const tool of bundle.tools) {
+      if (seen.has(tool.name)) continue;
+      if (isMinimalModeToolName(tool.name)) continue;
+      if (tool.name === TOOL_SEARCH_TOOL_NAME || tool.name === EXIT_PLAN_MODE_TOOL_NAME) {
+        continue;
+      }
+      seen.add(tool.name);
+      const serverLabel = params.mcpBusinessBundle?.toolNameMap.get(tool.name)?.serverLabel;
+      const metadata = bundle.metadataByName.get(tool.name);
+      entries.push({
+        tool,
+        ...(serverLabel ? { serverLabel } : { label: metadata?.displayCategory ?? bundle.groupId }),
+      });
+    }
+  }
+  return entries;
+}
+
 async function buildBaseBuiltinToolBundles(
   params: BuildBuiltinBaseToolRegistryParams,
 ): Promise<BaseBuiltinToolBundles> {
+  // 极简模式不裁剪执行层：所有工具仍注册在 registry 中，由 ToolSearch +
+  // requestToolFilter 控制哪些 schema 进入模型请求。
   const baseBundles: BuiltinToolBundle[] = [
     createFsTools({
       workdir: params.workdir,
@@ -314,39 +356,33 @@ export async function buildBuiltinToolRegistry(
     planMode?: {
       conversationId: string;
     };
-    /** MCP 懒加载:schema 总量超阈值时注入 ToolSearch,MCP 工具延迟到激活后
-     * 才进模型请求(执行层始终全量注册)。仅 chat 场景;plan mode 下无意义
-     * (MCP 工具非只读,本就不在表内)。 */
+    /** 工具懒加载:极简模式下恒启用 ToolSearch;非极简模式仅在 MCP schema 超阈值时启用。 */
     toolSearch?: {
       conversationId: string;
     };
   },
 ) {
+  const minimalMode = params.minimalMode === true;
   const planModeActive = Boolean(params.planMode);
   const { bundles: baseBundles, mcpBusinessBundle } = await buildBaseBuiltinToolBundles(params);
   // MCP 懒加载判定:对"会进请求的 schema JSON"估算 token(与 tokenLedger 同
   // 口径),超阈值才启用——多一次检索回合的代价只在真省下可观 context 时才值。
   // 判定与目录的输入必须是 MCP 业务工具 bundle 的直接引用:McpManager 也注册在
   // groupId "mcp" 下且先入列,按 groupId find 会命中它,让延迟判定永远失效。
-  const mcpToolDeferralActive = Boolean(
-    params.toolSearch &&
-      params.runtimeScope === "chat" &&
-      !planModeActive &&
-      mcpBusinessBundle &&
-      shouldDeferMcpTools(mcpBusinessBundle.tools),
-  );
-  const toolSearchBundles =
-    mcpToolDeferralActive && params.toolSearch && mcpBusinessBundle
-      ? [
-          createToolSearchTools({
-            conversationId: params.toolSearch.conversationId,
-            entries: mcpBusinessBundle.tools.map((tool) => ({
-              tool,
-              serverLabel: mcpBusinessBundle.toolNameMap.get(tool.name)?.serverLabel ?? "",
-            })),
-          }),
-        ]
-      : [];
+  const mcpToolDeferralActive =
+    !minimalMode &&
+    Boolean(
+      params.toolSearch &&
+        params.runtimeScope === "chat" &&
+        !planModeActive &&
+        mcpBusinessBundle &&
+        shouldDeferMcpTools(mcpBusinessBundle.tools),
+    );
+  // 极简模式：无论 MCP schema 大小，都启用通用延迟注入，只保留常驻工具。
+  const toolDeferralActive =
+    minimalMode &&
+    Boolean(params.toolSearch && params.runtimeScope === "chat" && !planModeActive);
+
   const taskBundles =
     params.runtimeScope === "chat" && params.taskStateStore
       ? [createTaskTools(params.taskStateStore)]
@@ -360,37 +396,13 @@ export async function buildBuiltinToolRegistry(
       ? [
           createExitPlanModeTools({
             conversationId: params.planMode.conversationId,
+            minimal: minimalMode,
           }),
         ]
       : [];
-  const chatBundles = [
-    ...taskBundles,
-    ...askUserQuestionBundles,
-    ...planModeBundles,
-    ...toolSearchBundles,
-  ];
-
-  // Plan mode:在注册表组装层裁掉非只读工具(而非 deny 后备拦截)——模型根本
-  // 看不到写工具,不浪费 token 也无泄漏面。子代理协作工具(Agent/SendMessage)
-  // 保留,Agent 由 forceReadonly 在 validate 层强制 readonly。
-  const filterForPlanMode = (registry: ReturnType<typeof createBuiltinToolRegistry>) => {
-    const withDeferralFlag: BuiltinToolRegistry = {
-      ...registry,
-      mcpToolDeferralActive,
-    };
-    if (!planModeActive) return withDeferralFlag;
-    return {
-      ...withDeferralFlag,
-      tools: withDeferralFlag.tools.filter((tool) =>
-        isPlanModeAllowedTool(tool.name, withDeferralFlag.metadataByName.get(tool.name)),
-      ),
-    };
-  };
+  const chatBundles = [...taskBundles, ...askUserQuestionBundles, ...planModeBundles];
 
   const subagentRuntime = params.subagentRuntime;
-  if (!subagentRuntime) {
-    return filterForPlanMode(createBuiltinToolRegistry([...baseBundles, ...chatBundles]));
-  }
   const subagentAdditionalRoots = params.additionalRoots?.map((root) => ({
     ...root,
     // Delegated agents can inspect parent-granted roots, but they never
@@ -398,27 +410,27 @@ export async function buildBuiltinToolRegistry(
     access: "read" as const,
   }));
 
-  const baseRegistry = createBuiltinToolRegistry(baseBundles);
-  // The Agent tool description embeds the roster, so the store must be
-  // hydrated before the bundle is created. Roster load failures degrade to an
-  // empty roster instead of blocking the whole registry.
-  try {
-    await subagentRuntime.store.ready();
-  } catch (error) {
-    console.warn("Failed to load subagent roster for the Agent tool", error);
-  }
-  const parentMessageBundle = subagentRuntime.store.conversationId
-    ? createSendMessageTools({
-        store: subagentRuntime.store,
-        senderId: SUBAGENT_PARENT_ID,
-        senderName: "Parent Agent",
-      })
-    : null;
-  const parentBundles = parentMessageBundle ? [...baseBundles, parentMessageBundle] : baseBundles;
-  return filterForPlanMode(
-    createBuiltinToolRegistry([
-      ...parentBundles,
-      ...chatBundles,
+  let subagentBundles: BuiltinToolBundle[] = [];
+  let baseRegistryForSubagent: ReturnType<typeof createBuiltinToolRegistry> | null = null;
+  if (subagentRuntime) {
+    baseRegistryForSubagent = createBuiltinToolRegistry(baseBundles);
+    // The Agent tool description embeds the roster, so the store must be
+    // hydrated before the bundle is created. Roster load failures degrade to an
+    // empty roster instead of blocking the whole registry.
+    try {
+      await subagentRuntime.store.ready();
+    } catch (error) {
+      console.warn("Failed to load subagent roster for the Agent tool", error);
+    }
+    const parentMessageBundle = subagentRuntime.store.conversationId
+      ? createSendMessageTools({
+          store: subagentRuntime.store,
+          senderId: SUBAGENT_PARENT_ID,
+          senderName: "Parent Agent",
+        })
+      : null;
+    subagentBundles = [
+      ...(parentMessageBundle ? [parentMessageBundle] : []),
       createSubagentTools({
         providerId: subagentRuntime.providerId,
         model: subagentRuntime.model,
@@ -430,9 +442,9 @@ export async function buildBuiltinToolRegistry(
         templates: subagentRuntime.templates,
         store: subagentRuntime.store,
         scheduler: subagentRuntime.scheduler,
-        baseTools: baseRegistry.tools,
-        executeToolCall: baseRegistry.executeToolCall,
-        metadataByName: baseRegistry.metadataByName,
+        baseTools: baseRegistryForSubagent.tools,
+        executeToolCall: baseRegistryForSubagent.executeToolCall,
+        metadataByName: baseRegistryForSubagent.metadataByName,
         additionalRoots: subagentAdditionalRoots,
         // Plan mode:子代理只许 readonly,worktree 请求按参数错误拒绝。
         forceReadonly: planModeActive,
@@ -460,6 +472,72 @@ export async function buildBuiltinToolRegistry(
             ).bundles,
           ),
       }),
-    ]),
-  );
+    ];
+  }
+
+  const preToolSearchBundles = [...baseBundles, ...chatBundles, ...subagentBundles];
+
+  let toolSearchBundle: BuiltinToolBundle | undefined;
+  let deferredToolNames: string[] = [];
+  if (toolDeferralActive && params.toolSearch) {
+    const entries = collectDeferredToolEntries({
+      bundles: preToolSearchBundles,
+      mcpBusinessBundle,
+    });
+    deferredToolNames = entries.map((entry) => entry.tool.name);
+    toolSearchBundle = createToolSearchTools({
+      conversationId: params.toolSearch.conversationId,
+      entries,
+    });
+  } else if (mcpToolDeferralActive && params.toolSearch && mcpBusinessBundle) {
+    toolSearchBundle = createToolSearchTools({
+      conversationId: params.toolSearch.conversationId,
+      entries: mcpBusinessBundle.tools.map((tool) => ({
+        tool,
+        serverLabel: mcpBusinessBundle.toolNameMap.get(tool.name)?.serverLabel ?? "",
+      })),
+    });
+  }
+
+  const allBundles = [
+    ...preToolSearchBundles,
+    ...(toolSearchBundle ? [toolSearchBundle] : []),
+  ];
+  const registry = createBuiltinToolRegistry(allBundles);
+  const withDeferralFlags: BuiltinToolRegistry = {
+    ...registry,
+    mcpToolDeferralActive,
+    toolDeferralActive,
+    ...(deferredToolNames.length > 0 ? { deferredToolNames } : {}),
+  };
+
+  // Plan mode:在注册表组装层裁掉非只读工具(而非 deny 后备拦截)——模型根本
+  // 看不到写工具,不浪费 token 也无泄漏面。子代理协作工具(Agent/SendMessage)
+  // 保留,Agent 由 forceReadonly 在 validate 层强制 readonly。
+  const filterForPlanMode = (registryToFilter: ReturnType<typeof createBuiltinToolRegistry>) => {
+    if (!planModeActive) return registryToFilter;
+    return {
+      ...registryToFilter,
+      tools: registryToFilter.tools.filter((tool) =>
+        isPlanModeAllowedTool(tool.name, registryToFilter.metadataByName.get(tool.name)),
+      ),
+    };
+  };
+
+  // 极简模式 plan mode：即使全量执行层仍在 registry 中，也只把常驻只读工具
+  // + ExitPlanMode 暴露给模型，避免 plan 轮 schema 膨胀。
+  const filterForMinimalPlanMode = (
+    registryToFilter: ReturnType<typeof createBuiltinToolRegistry>,
+  ) => {
+    if (!minimalMode || !planModeActive) return registryToFilter;
+    return {
+      ...registryToFilter,
+      tools: registryToFilter.tools.filter(
+        (tool) =>
+          isMinimalModeToolName(tool.name) || tool.name === EXIT_PLAN_MODE_TOOL_NAME,
+      ),
+    };
+  };
+
+  return filterForMinimalPlanMode(filterForPlanMode(withDeferralFlags));
 }

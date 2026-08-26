@@ -8,12 +8,119 @@ import {
 } from "../../runtimePlatform";
 import type { AdditionalProjectRoot } from "../../tools/additionalProjectRoots";
 
-export function buildToolsSuffix(
+function buildCompactToolsSuffix(
   workdir: string,
   availableToolNames?: readonly string[],
   runtimePlatformInput?: RuntimePlatform,
   additionalRoots?: readonly AdditionalProjectRoot[],
 ) {
+  const runtimePlatform = normalizeRuntimePlatform(runtimePlatformInput) ?? inferRuntimePlatform();
+  const platformLabel = runtimePlatformLabel(runtimePlatform);
+  const allowAll = availableToolNames === undefined;
+  const toolNames = new Set(availableToolNames ?? []);
+  const has = (name: string) => allowAll || toolNames.has(name);
+  const hasAny = (...names: string[]) => names.some(has);
+  const planModeActive = !allowAll && has(EXIT_PLAN_MODE_TOOL_NAME);
+  const fileTools = ["Read", "Write", "Edit", "Delete", "List", "Grep", "Glob"].filter(has);
+  const hasFileTool = fileTools.length > 0;
+  const canWrite = hasAny("Write", "Edit", "Delete");
+  const hasBash = has("Bash");
+
+  const toolGroups: string[] = [];
+  if (planModeActive) toolGroups.push(EXIT_PLAN_MODE_TOOL_NAME);
+  if (fileTools.length > 0) toolGroups.push(fileTools.join(" / "));
+  if (hasBash) toolGroups.push("Bash");
+  const availableLine = toolGroups.length > 0 ? toolGroups.join(" · ") : "none";
+
+  const sections: string[] = [];
+  sections.push(
+    planModeActive
+      ? [
+          "# Tool-Execution Mode",
+          "",
+          `Plan mode is ACTIVE. You have read-only tools plus ${EXIT_PLAN_MODE_TOOL_NAME}; submit the complete deliverable via ${EXIT_PLAN_MODE_TOOL_NAME}.`,
+        ].join("\n")
+      : [
+          "# Tool-Execution Mode",
+          "",
+          "Use the available tools for file, search, and shell work; answer directly when no tool is needed.",
+        ].join("\n"),
+  );
+
+  sections.push(
+    [
+      "## Final Reply",
+      "- Reply in plain text plus Markdown; never include raw tool-call JSON or raw tool arguments.",
+      ...(planModeActive
+        ? [`- Do not put the deliverable here; call ${EXIT_PLAN_MODE_TOOL_NAME} instead.`]
+        : []),
+    ].join("\n"),
+  );
+
+  if (hasFileTool || hasBash) {
+    const lines = [
+      "## Workspace & Paths",
+      `- Workspace root: \`${workdir}\``,
+      "- Use workspace-relative paths exactly as tools return them, e.g. `src/App.tsx`; use `/` as the separator.",
+    ];
+    if (hasFileTool && (additionalRoots?.length ?? 0) > 0) {
+      lines.push(
+        `- Additional project roots: ${(additionalRoots ?? [])
+          .map(
+            (root) =>
+              `\`root://${root.alias}/\` (${root.access === "write" ? "read/write" : "read-only"})`,
+          )
+          .join(", ")}.`,
+      );
+    }
+    sections.push(lines.join("\n"));
+  }
+
+  if (hasFileTool) {
+    const lines = ["## File Operations"];
+    if (hasAny("Read", "List", "Grep", "Glob")) {
+      lines.push(
+        "- Read known files directly; use Grep / Glob / List first when the path is unknown.",
+      );
+    }
+    if (canWrite) {
+      lines.push(
+        "- Write/Edit/Delete operate only inside the workspace or writable root:// roots; use Delete for deletions, not Bash.",
+      );
+    }
+    sections.push(lines.join("\n"));
+  }
+
+  if (hasBash) {
+    sections.push(
+      [
+        "## Bash",
+        `- Current platform: ${platformLabel}.`,
+        "- Bash follows the path rules in **Workspace & Paths**.",
+        "- Do not use Bash to read/search/write workspace files in place of file tools.",
+      ].join("\n"),
+    );
+  }
+
+  sections.push(["## Available Tools", `- ${availableLine}`].join("\n"));
+  return sections.join("\n\n");
+}
+
+export function buildToolsSuffix(
+  workdir: string,
+  availableToolNames?: readonly string[],
+  runtimePlatformInput?: RuntimePlatform,
+  additionalRoots?: readonly AdditionalProjectRoot[],
+  options?: { compact?: boolean },
+) {
+  if (options?.compact) {
+    return buildCompactToolsSuffix(
+      workdir,
+      availableToolNames,
+      runtimePlatformInput,
+      additionalRoots,
+    );
+  }
   const runtimePlatform = normalizeRuntimePlatform(runtimePlatformInput) ?? inferRuntimePlatform();
   const platformLabel = runtimePlatformLabel(runtimePlatform);
   const allowAll = availableToolNames === undefined;

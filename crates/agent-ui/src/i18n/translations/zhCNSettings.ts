@@ -270,6 +270,10 @@ export const ZH_CN_SETTINGS_TRANSLATIONS = {
   "settings.systemTools": "系统工具",
   "settings.systemToolsDesc":
     "查看 LiveAgent 在 Agent 模式下自动注册的内置工具，并为每个工具设置审批策略（放行 / 执行前询问 / 拒绝）。",
+  "settings.systemToolsMinimalMode": "极简模式",
+  "settings.systemToolsMinimalModeDesc":
+    "常驻 Read / Write / Edit / Glob / Grep / Bash / ToolSearch 七个核心工具，MemoryManager 等其余工具通过 ToolSearch 按需加载；默认基础上下文控制在约 4K token 内。",
+  "settings.systemToolsMinimalModeKept": "极简模式保留",
   "settings.builtinToolCategory.fs": "文件系统",
   "settings.builtinToolCategory.process": "终端与进程",
   "settings.builtinToolCategory.intelligence": "智能与记忆",

@@ -1,10 +1,11 @@
-// MCP 工具懒加载(ToolSearch):MCP 工具 schema 总量超过阈值时,工具仍全量注册
-// 在执行层(pi-agent-core 的 prepareToolCall 从 loop 快照查找,必须始终找得到),
-// 但**发给模型的请求**只包含已激活的 MCP 工具——未激活的经 runner 的
-// requestToolFilter 滤掉(与 provider 原生搜索"执行层可见、请求层隐藏"同机制)。
-// 模型通过 ToolSearch 检索并激活工具;直接调用未激活工具也会执行成功并自动
-// 激活(turn 层 executor wrapper),避免"调用成功但下轮看不见"的困惑。
-// 激活集按会话保存在内存(跨 turn 持久,重启后模型重新检索一次即可)。
+// 工具懒加载(ToolSearch):MCP 工具 schema 总量超过阈值时,或极简模式下需要
+// 压缩常驻工具时,工具仍全量注册在执行层(pi-agent-core 的 prepareToolCall
+// 从 loop 快照查找,必须始终找得到),但**发给模型的请求**只包含常驻/已激活
+// 工具——未激活的经 runner 的 requestToolFilter 滤掉(与 provider 原生搜索
+// "执行层可见、请求层隐藏"同机制)。模型通过 ToolSearch 检索并激活工具;直接
+// 调用未激活工具也会执行成功并自动激活(turn 层 executor wrapper),避免
+// "调用成功但下轮看不见"的困惑。激活集按会话保存在内存(跨 turn 持久,重启后
+// 模型重新检索一次即可)。
 
 import type { Tool, ToolCall, ToolResultMessage } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
@@ -32,6 +33,10 @@ const TOOL_SEARCH_DEFAULT_RESULTS = 5;
 const activationByConversation = new Map<string, Set<string>>();
 
 export function getMcpToolActivation(conversationId: string): Set<string> {
+  return getDeferredToolActivation(conversationId);
+}
+
+export function getDeferredToolActivation(conversationId: string): Set<string> {
   const key = conversationId.trim();
   let set = activationByConversation.get(key);
   if (!set) {
@@ -42,12 +47,24 @@ export function getMcpToolActivation(conversationId: string): Set<string> {
 }
 
 export function clearMcpToolActivation(conversationId: string) {
+  clearDeferredToolActivation(conversationId);
+}
+
+export function clearDeferredToolActivation(conversationId: string) {
   activationByConversation.delete(conversationId.trim());
 }
 
+/** MCP 懒加载目录条目；保留原类型名以兼容现有调用。 */
 export type DeferredMcpToolEntry = {
   tool: Tool;
   serverLabel: string;
+};
+
+/** 通用延迟工具目录条目：MCP 传 serverLabel，内置工具可传 label。 */
+export type DeferredToolEntry = {
+  tool: Tool;
+  serverLabel?: string;
+  label?: string;
 };
 
 function normalizeQueryTerms(query: string): string[] {
@@ -59,13 +76,13 @@ function normalizeQueryTerms(query: string): string[] {
 }
 
 /**
- * 无依赖的轻量评分:词项对 name(×3)/serverLabel(×2)/description(×1) 的
- * 子串命中加权求和。目录只有几十到几百个工具,线性扫描足够;不引入 FTS。
+ * 无依赖的轻量评分:词项对 name(×3)/serverLabel 或 label(×2)/description(×1)
+ * 的子串命中加权求和。目录只有几十到几百个工具,线性扫描足够;不引入 FTS。
  */
-function scoreEntry(entry: DeferredMcpToolEntry, terms: string[]): number {
+function scoreEntry(entry: DeferredToolEntry, terms: string[]): number {
   const name = entry.tool.name.toLowerCase();
   const description = (entry.tool.description ?? "").toLowerCase();
-  const server = entry.serverLabel.toLowerCase();
+  const server = (entry.serverLabel ?? entry.label ?? "").toLowerCase();
   let score = 0;
   for (const term of terms) {
     if (name.includes(term)) score += 3;
@@ -109,17 +126,29 @@ export function shouldDeferMcpTools(
 
 export function createToolSearchTools(params: {
   conversationId: string;
-  /** 被延迟注入的 MCP 工具目录(name 为规范调用名 mcp_<server>_<tool>)。 */
-  entries: readonly DeferredMcpToolEntry[];
+  /** 被延迟注入的工具目录：MCP 传 serverLabel，内置工具可传 label。 */
+  entries: readonly DeferredToolEntry[];
 }): BuiltinToolBundle {
   const activation = getMcpToolActivation(params.conversationId);
-  const serverLabels = [...new Set(params.entries.map((entry) => entry.serverLabel))];
+  const isMcpCatalog =
+    params.entries.length > 0 && params.entries.every((entry) => Boolean(entry.serverLabel));
+  const labels = [
+    ...new Set(
+      params.entries.map((entry) => entry.serverLabel ?? entry.label ?? "builtin").filter(Boolean),
+    ),
+  ];
+  const catalogNoun = isMcpCatalog ? "MCP tools" : "deferred tools";
+  const labelText =
+    labels.length > 5 ? `${labels.slice(0, 5).join(", ")} (+${labels.length - 5} more)` : labels.join(", ");
+  const sourceText = isMcpCatalog
+    ? `${params.entries.length} MCP tools (from: ${labelText}) are NOT`
+    : `${params.entries.length} deferred tools are NOT`;
   const toolSearch: Tool = {
     name: TOOL_SEARCH_TOOL_NAME,
     description: [
-      `Search the deferred MCP tool catalog and activate matching tools. ${params.entries.length} MCP tools (from: ${serverLabels.join(", ")}) are NOT in your tool list yet to save context.`,
+      `Search the deferred tool catalog and activate matching tools. ${sourceText} in your tool list yet to save context.`,
       'Call this with a task-oriented query (e.g. "create issue", "query database", "send message") BEFORE assuming a capability is missing. Matched tools are returned with their full schemas and become directly callable from the next step on.',
-      "Results are ranked by name/server/description match. Broaden the query if nothing relevant comes back; activation persists for this conversation.",
+      "Results are ranked by name/category/description match. Broaden the query if nothing relevant comes back; activation persists for this conversation.",
     ].join("\n"),
     parameters: Type.Object({
       query: Type.String({
@@ -169,7 +198,7 @@ export function createToolSearchTools(params: {
         content: [
           {
             type: "text",
-            text: `No deferred MCP tools matched "${query}". ${params.entries.length} tools available from: ${serverLabels.join(", ")}. Try broader or different keywords.`,
+            text: `No deferred ${catalogNoun} matched "${query}". ${params.entries.length} tools available from: ${labelText}. Try broader or different keywords.`,
           },
         ],
         details,
@@ -253,6 +282,23 @@ export function buildMcpRequestToolFilter(params: {
   return (toolName: string) => {
     const metadata = params.metadataByName.get(toolName);
     if (metadata?.groupId !== "mcp" || metadata.kind !== "mcp") return true;
+    return activation.has(toolName);
+  };
+}
+
+/**
+ * 通用请求层可见性谓词：只在 `deferredToolNames` 中的工具需要已激活才可见，
+ * 其余工具（常驻工具、ToolSearch、未列入延迟目录的工具）恒可见。
+ */
+export function buildDeferredToolRequestFilter(params: {
+  conversationId: string;
+  metadataByName: Map<string, BuiltinToolMetadata>;
+  deferredToolNames: readonly string[] | ReadonlySet<string>;
+}): (toolName: string) => boolean {
+  const activation = getDeferredToolActivation(params.conversationId);
+  const deferred = new Set(params.deferredToolNames);
+  return (toolName: string) => {
+    if (!deferred.has(toolName)) return true;
     return activation.has(toolName);
   };
 }
